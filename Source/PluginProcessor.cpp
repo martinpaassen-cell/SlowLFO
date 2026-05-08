@@ -65,4 +65,9 @@ void SlowLFOProcessor::setStateInformation(const void* d,int sz) {
     std::unique_ptr<juce::XmlElement> xml(getXmlFromBinary(d,sz));
     if(xml&&xml->hasTagName(apvts.state.getType())) apvts.replaceState(juce::ValueTree::fromXml(*xml));
 }
+
+juce::AudioProcessorEditor* SlowLFOProcessor::createEditor()
+{
+    return new SlowLFOEditor(*this);
+}
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter(){ return new SlowLFOProcessor(); }
