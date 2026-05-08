@@ -2,476 +2,284 @@
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
 
-// ── Kingfisher colour palette ─────────────────────────────────────────────
-namespace KC {
-    const juce::Colour panelBg   { 0xff071820 };
-    const juce::Colour modBg     { 0xff0b2232 };
-    const juce::Colour border    { 0xff1a4555 };
-    const juce::Colour text      { 0xffd8eff5 };
-    const juce::Colour textDim   { 0xff4a7a8a };
-    const juce::Colour orange    { 0xffe85010 };  // breast orange
-    const juce::Colour teal      { 0xff00c8e0 };  // turquoise
-    const juce::Colour blue      { 0xff0090b8 };  // wing blue
-    const juce::Colour darkBg    { 0xff040e14 };
-    const juce::Colour scopeBg   { 0xff040e18 };
-    const juce::Colour ledOn     { 0xffff7020 };
+static const uint32_t KC_PANEL  = 0xff071820u;
+static const uint32_t KC_MOD    = 0xff0b2232u;
+static const uint32_t KC_BORDER = 0xff1a4555u;
+static const uint32_t KC_TEXT   = 0xffd8eff5u;
+static const uint32_t KC_DIM    = 0xff4a7a8au;
+static const uint32_t KC_ORANGE = 0xffe85010u;
+static const uint32_t KC_TEAL   = 0xff00c8e0u;
+static const uint32_t KC_SCOPE  = 0xff040e18u;
+static const uint32_t KC_LFO[6] = {
+    0xff00c8e0u, 0xffe85010u, 0xff0090b8u,
+    0xffff8040u, 0xff40b8d0u, 0xffc04010u
+};
 
-    // Per-LFO accent colours — alternating teal/orange
-    inline juce::Colour lfoCol(int i) {
-        static juce::Colour cols[6] = {
-            {0xff00c8e0},{0xffe85010},{0xff0090b8},
-            {0xffff8040},{0xff40b8d0},{0xffc04010}
-        };
-        return cols[i % 6];
-    }
-}
-
-// ── Tiny oscilloscope component ───────────────────────────────────────────
 class ScopeDisplay : public juce::Component, public juce::Timer
 {
 public:
-    ScopeDisplay(SlowLFOProcessor& p, int idx)
-        : proc(p), lfoIdx(idx), history(HIST, 0.f)
-    {
-        startTimerHz(30);
-    }
+    ScopeDisplay(SlowLFOProcessor& p, int idx) : proc(p), lfoIdx(idx)
+    { history.assign(HIST, 0.0f); startTimerHz(30); }
     ~ScopeDisplay() override { stopTimer(); }
 
     void timerCallback() override
-    {
-        float v = proc.liveValue[lfoIdx].load();
-        history.erase(history.begin());
-        history.push_back(v);
-        repaint();
-    }
+    { history.erase(history.begin()); history.push_back(proc.liveValue[lfoIdx].load()); repaint(); }
 
     void paint(juce::Graphics& g) override
     {
         auto b = getLocalBounds().toFloat();
-        g.setColour(KC::scopeBg);
-        g.fillRoundedRectangle(b, 2.f);
-        g.setColour(KC::border.withAlpha(0.5f));
-        g.drawRoundedRectangle(b.reduced(0.5f), 2.f, 1.f);
-
-        // Grid
-        g.setColour(KC::border.withAlpha(0.25f));
-        g.drawHorizontalLine((int)(b.getCentreY()), b.getX()+2, b.getRight()-2);
-        for (float x : {0.25f, 0.5f, 0.75f})
-            g.drawVerticalLine((int)(b.getX() + b.getWidth()*x), b.getY()+2, b.getBottom()-2);
-
-        // Waveform
-        auto col = KC::lfoCol(lfoIdx);
-        g.setColour(col.withAlpha(0.9f));
+        g.setColour(juce::Colour(KC_SCOPE)); g.fillRoundedRectangle(b, 2.0f);
+        g.setColour(juce::Colour(KC_BORDER).withAlpha(0.3f));
+        g.drawHorizontalLine((int)b.getCentreY(), b.getX()+2.0f, b.getRight()-2.0f);
+        g.setColour(juce::Colour(KC_LFO[lfoIdx]).withAlpha(0.9f));
         juce::Path wave;
-        float W = b.getWidth()-4, H = b.getHeight()-4;
-        float cx = b.getX()+2, cy = b.getCentreY();
-        for (int i = 0; i < HIST; ++i) {
-            float x = cx + i * W / (HIST - 1);
-            float y = cy - history[i] * (H * 0.45f);
-            if (i == 0) wave.startNewSubPath(x, y);
-            else        wave.lineTo(x, y);
+        float W=b.getWidth()-4.0f, H=b.getHeight()-4.0f;
+        float cx=b.getX()+2.0f, cy=b.getCentreY();
+        for(int i=0;i<HIST;++i){
+            float x=cx+(float)i*W/(float)(HIST-1);
+            float y=cy-history[(size_t)i]*H*0.45f;
+            if(i==0) wave.startNewSubPath(x,y); else wave.lineTo(x,y);
         }
         g.strokePath(wave, juce::PathStrokeType(1.5f));
+        g.setColour(juce::Colour(KC_BORDER).withAlpha(0.5f));
+        g.drawRoundedRectangle(b.reduced(0.5f),2.0f,1.0f);
     }
-
 private:
-    static constexpr int HIST = 80;
-    SlowLFOProcessor& proc;
-    int lfoIdx;
+    static constexpr int HIST=80;
+    SlowLFOProcessor& proc; int lfoIdx;
     std::vector<float> history;
 };
 
-// ── Single LFO strip ─────────────────────────────────────────────────────
 class LFOStrip : public juce::Component, public juce::Timer
 {
 public:
-    LFOStrip(SlowLFOProcessor& p, int idx)
-        : proc(p), lfoIdx(idx), scope(p, idx)
+    LFOStrip(SlowLFOProcessor& p, int idx) : proc(p), lfoIdx(idx), scope(p, idx)
     {
-        auto col = KC::lfoCol(idx);
-
-        // Shape buttons
-        for (auto& name : {"SIN","TRI","SAW","SQR","RND"}) {
-            auto* btn = new juce::TextButton(name);
-            btn->setClickingTogglesState(false);
-            btn->setColour(juce::TextButton::buttonColourId,   KC::modBg);
-            btn->setColour(juce::TextButton::buttonOnColourId, col.withAlpha(0.25f));
-            btn->setColour(juce::TextButton::textColourOffId,  KC::textDim);
-            btn->setColour(juce::TextButton::textColourOnId,   col);
-            shapeButtons.add(btn);
-            addAndMakeVisible(btn);
+        juce::Colour col = juce::Colour(KC_LFO[idx]);
+        const char* nm[] = {"SIN","TRI","SAW","SQR","RND"};
+        for(int si=0;si<5;++si){
+            auto* btn = new juce::TextButton(nm[si]);
+            btn->setColour(juce::TextButton::buttonColourId,  juce::Colour(KC_MOD));
+            btn->setColour(juce::TextButton::textColourOffId, juce::Colour(KC_DIM));
+            int cap=si; btn->onClick=[this,cap]{setShape(cap);};
+            shapeButtons.add(btn); addAndMakeVisible(btn);
         }
-        int si = 0;
-        for (auto* btn : shapeButtons) {
-            int captureIdx = si++;
-            btn->onClick = [this, captureIdx] { setShape(captureIdx); };
-        }
+        shapeButtons[0]->setColour(juce::TextButton::buttonColourId,  col.withAlpha(0.25f));
+        shapeButtons[0]->setColour(juce::TextButton::textColourOffId, col);
 
-        // Rate knob
-        rateKnob.setSliderStyle(juce::Slider::RotaryVerticalDrag);
-        rateKnob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
-        rateKnob.setColour(juce::Slider::rotarySliderFillColourId,    col);
-        rateKnob.setColour(juce::Slider::rotarySliderOutlineColourId, col.withAlpha(0.25f));
-        rateKnob.setColour(juce::Slider::thumbColourId,               KC::panelBg);
-        addAndMakeVisible(rateKnob);
-        rateAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-            p.apvts, p.pid(idx,"rate"), rateKnob);
+        auto setupKnob=[&](juce::Slider& sl, juce::Colour c, const char* pid2){
+            sl.setSliderStyle(juce::Slider::RotaryVerticalDrag);
+            sl.setTextBoxStyle(juce::Slider::NoTextBox,false,0,0);
+            sl.setColour(juce::Slider::rotarySliderFillColourId,    c);
+            sl.setColour(juce::Slider::rotarySliderOutlineColourId, c.withAlpha(0.25f));
+            sl.setColour(juce::Slider::thumbColourId, juce::Colour(KC_PANEL));
+            addAndMakeVisible(sl);
+            return std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+                p.apvts, p.pid(idx,pid2), sl);
+        };
+        rateAttach  = setupKnob(rateKnob,  col,                     "rate");
+        depthAttach = setupKnob(depthKnob, juce::Colour(KC_ORANGE), "depth");
 
-        // Depth knob
-        depthKnob.setSliderStyle(juce::Slider::RotaryVerticalDrag);
-        depthKnob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
-        depthKnob.setColour(juce::Slider::rotarySliderFillColourId,    KC::orange);
-        depthKnob.setColour(juce::Slider::rotarySliderOutlineColourId, KC::orange.withAlpha(0.25f));
-        depthKnob.setColour(juce::Slider::thumbColourId,               KC::panelBg);
-        addAndMakeVisible(depthKnob);
-        depthAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-            p.apvts, p.pid(idx,"depth"), depthKnob);
+        auto setupSpin=[&](juce::Slider& sl, int lo, int hi, const char* pid2){
+            sl.setRange(lo,hi,1); sl.setSliderStyle(juce::Slider::IncDecButtons);
+            sl.setTextBoxStyle(juce::Slider::TextBoxLeft,false,36,18);
+            sl.setColour(juce::Slider::textBoxTextColourId,       juce::Colour(KC_TEAL));
+            sl.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colour(KC_SCOPE));
+            sl.setColour(juce::Slider::textBoxOutlineColourId,    juce::Colour(KC_BORDER));
+            addAndMakeVisible(sl);
+            return std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
+                p.apvts, p.pid(idx,pid2), sl);
+        };
+        ccAttach = setupSpin(ccSpinner, 0, 127, "cc");
+        chAttach = setupSpin(chSpinner, 1,  16, "ch");
+        chSpinner.setColour(juce::Slider::textBoxTextColourId, juce::Colour(KC_TEXT));
 
-        // CC spinner
-        ccSpinner.setRange(0, 127, 1);
-        ccSpinner.setSliderStyle(juce::Slider::IncDecButtons);
-        ccSpinner.setTextBoxStyle(juce::Slider::TextBoxLeft, false, 36, 18);
-        ccSpinner.setColour(juce::Slider::textBoxTextColourId,       KC::teal);
-        ccSpinner.setColour(juce::Slider::textBoxBackgroundColourId, KC::scopeBg);
-        ccSpinner.setColour(juce::Slider::textBoxOutlineColourId,    KC::border);
-        addAndMakeVisible(ccSpinner);
-        ccAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-            p.apvts, p.pid(idx,"cc"), ccSpinner);
-
-        // Channel spinner
-        chSpinner.setRange(1, 16, 1);
-        chSpinner.setSliderStyle(juce::Slider::IncDecButtons);
-        chSpinner.setTextBoxStyle(juce::Slider::TextBoxLeft, false, 28, 18);
-        chSpinner.setColour(juce::Slider::textBoxTextColourId,       KC::text);
-        chSpinner.setColour(juce::Slider::textBoxBackgroundColourId, KC::scopeBg);
-        chSpinner.setColour(juce::Slider::textBoxOutlineColourId,    KC::border);
-        addAndMakeVisible(chSpinner);
-        chAttach = std::make_unique<juce::AudioProcessorValueTreeState::SliderAttachment>(
-            p.apvts, p.pid(idx,"ch"), chSpinner);
-
-        // Polarity buttons (Bi / Uni)
-        biBtn.setButtonText("BI");
-        biBtn.setClickingTogglesState(false);
-        biBtn.onClick = [this]{ setPolar(0); };
-        uniBtn.setButtonText("UNI");
-        uniBtn.setClickingTogglesState(false);
-        uniBtn.onClick = [this]{ setPolar(1); };
-        for (auto* b : {&biBtn, &uniBtn}) {
-            b->setColour(juce::TextButton::buttonColourId,  KC::modBg);
-            b->setColour(juce::TextButton::textColourOffId, KC::textDim);
+        biBtn.setButtonText("BI");   biBtn.onClick=[this]{setPolar(0);};
+        uniBtn.setButtonText("UNI"); uniBtn.onClick=[this]{setPolar(1);};
+        for(auto* b:{&biBtn,&uniBtn}){
+            b->setColour(juce::TextButton::buttonColourId,  juce::Colour(KC_MOD));
+            b->setColour(juce::TextButton::textColourOffId, juce::Colour(KC_DIM));
             addAndMakeVisible(b);
         }
-        updatePolarButtons();
+        biBtn.setColour(juce::TextButton::buttonColourId,  juce::Colour(KC_ORANGE).withAlpha(0.25f));
+        biBtn.setColour(juce::TextButton::textColourOffId, juce::Colour(KC_ORANGE));
+
+        auto mkL=[&](juce::Label& l, const char* t, uint32_t c2){
+            l.setText(t,juce::dontSendNotification);
+            l.setFont(juce::Font(9.0f));
+            l.setColour(juce::Label::textColourId, juce::Colour(c2));
+            l.setJustificationType(juce::Justification::centred);
+            addAndMakeVisible(l);
+        };
+        mkL(rateLbl,  "RATE",    KC_DIM);
+        mkL(depthLbl, "DEPTH",   KC_DIM);
+        mkL(ccLbl,    "CC OUT",  KC_DIM);
+        mkL(chLbl,    "MIDI CH", KC_DIM);
+        mkL(hzLbl,    "",        KC_DIM);
+        mkL(pctLbl,   "",        KC_ORANGE);
+        mkL(liveLbl,  "64",      KC_LFO[idx]);
 
         addAndMakeVisible(scope);
         startTimerHz(10);
     }
-
     ~LFOStrip() override { stopTimer(); }
 
     void timerCallback() override
     {
-        // Update Hz label
-        float rate01 = (float)rateKnob.getValue();
-        float hz = 0.002f * std::pow(1000.f, rate01);
-        hzLabel.setText(hz < 0.1f
-            ? juce::String(hz, 3) + " Hz"
-            : juce::String(hz, 2) + " Hz",
-            juce::dontSendNotification);
-
-        // Update depth % label
-        pctLabel.setText(juce::String((int)(depthKnob.getValue() * 100)) + "%",
-                         juce::dontSendNotification);
-
-        // Update live CC label
-        int cc = proc.liveCCValue[lfoIdx].load();
-        liveCCLabel.setText("→ " + juce::String(cc), juce::dontSendNotification);
-        liveCCLabel.setColour(juce::Label::textColourId, KC::lfoCol(lfoIdx));
+        float r=(float)rateKnob.getValue();
+        float hz=0.002f*std::pow(1000.0f,r);
+        hzLbl.setText(hz<0.1f?juce::String(hz,3)+" Hz":juce::String(hz,2)+" Hz",
+                      juce::dontSendNotification);
+        pctLbl.setText(juce::String((int)(depthKnob.getValue()*100.0))+"%",
+                       juce::dontSendNotification);
+        liveLbl.setText("-> "+juce::String(proc.liveCCValue[lfoIdx].load()),
+                        juce::dontSendNotification);
     }
 
     void resized() override
     {
-        auto a = getLocalBounds().reduced(5);
-        a.removeFromTop(16); // lfo number label drawn in paint
-
-        scope.setBounds(a.removeFromTop(44));
-        a.removeFromTop(3);
-
-        // Shape buttons
-        auto shpRow = a.removeFromTop(16);
-        int sw = shpRow.getWidth() / 5;
-        for (auto* b : shapeButtons)
-            b->setBounds(shpRow.removeFromLeft(sw).reduced(1,0));
+        auto a=getLocalBounds().reduced(5); a.removeFromTop(16);
+        scope.setBounds(a.removeFromTop(44)); a.removeFromTop(3);
+        auto sr=a.removeFromTop(16); int sw=sr.getWidth()/5;
+        for(auto* b:shapeButtons) b->setBounds(sr.removeFromLeft(sw).reduced(1,0));
         a.removeFromTop(4);
-
-        // Rate knob + hz label
-        auto rRow = a.removeFromTop(50);
-        auto rLeft = rRow.removeFromLeft(rRow.getWidth()/2);
-        rateLbl.setBounds(rLeft.removeFromTop(12));
-        rateKnob.setBounds(rLeft);
-        hzLabel.setBounds(rRow.removeFromTop(12).translated(0,-1));
-        rRow.removeFromTop(4);
-
-        // Depth knob + pct label
-        auto dRow = a.removeFromTop(50);
-        auto dLeft = dRow.removeFromLeft(dRow.getWidth()/2);
-        depthLbl.setBounds(dLeft.removeFromTop(12));
-        depthKnob.setBounds(dLeft);
-        pctLabel.setBounds(dRow.removeFromTop(12).translated(0,-1));
-        dRow.removeFromTop(4);
-
+        rateLbl.setBounds(a.removeFromTop(12));
+        auto rr=a.removeFromTop(44);
+        rateKnob.setBounds(rr.removeFromLeft(rr.getWidth()/2));
+        hzLbl.setBounds(rr.removeFromTop(14));
+        depthLbl.setBounds(a.removeFromTop(12));
+        auto dr=a.removeFromTop(44);
+        depthKnob.setBounds(dr.removeFromLeft(dr.getWidth()/2));
+        pctLbl.setBounds(dr.removeFromTop(14));
         a.removeFromTop(2);
-
-        // CC spinner + live label
-        ccLbl.setBounds(a.removeFromTop(12));
-        ccSpinner.setBounds(a.removeFromTop(20));
-        liveCCLabel.setBounds(a.removeFromTop(14));
-        a.removeFromTop(2);
-
-        // CH spinner
-        chLbl.setBounds(a.removeFromTop(12));
-        chSpinner.setBounds(a.removeFromTop(20));
+        ccLbl.setBounds(a.removeFromTop(12)); ccSpinner.setBounds(a.removeFromTop(20));
+        liveLbl.setBounds(a.removeFromTop(14)); a.removeFromTop(2);
+        chLbl.setBounds(a.removeFromTop(12)); chSpinner.setBounds(a.removeFromTop(20));
         a.removeFromTop(4);
-
-        // Bi/Uni buttons
-        auto polRow = a.removeFromTop(18);
-        biBtn.setBounds(polRow.removeFromLeft(polRow.getWidth()/2).reduced(1,0));
-        uniBtn.setBounds(polRow.reduced(1,0));
+        auto pr=a.removeFromTop(18);
+        biBtn.setBounds(pr.removeFromLeft(pr.getWidth()/2).reduced(1,0));
+        uniBtn.setBounds(pr.reduced(1,0));
     }
 
     void paint(juce::Graphics& g) override
     {
-        auto col = KC::lfoCol(lfoIdx);
-
-        // Module background
-        g.setColour(KC::modBg);
-        g.fillRoundedRectangle(getLocalBounds().toFloat(), 3.f);
-
-        // Top accent line
+        g.setColour(juce::Colour(KC_MOD));
+        g.fillRoundedRectangle(getLocalBounds().toFloat(),3.0f);
+        juce::Colour col=juce::Colour(KC_LFO[lfoIdx]);
         g.setColour(col);
-        g.fillRect(getLocalBounds().removeFromTop(2).toFloat().withTrimmedLeft(3).withTrimmedRight(3));
-
-        // Border
-        g.setColour(KC::border.withAlpha(0.6f));
-        g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(0.5f), 3.f, 1.f);
-
-        // LFO number
-        g.setFont(juce::Font("Courier New", 9.f, juce::Font::bold));
-        g.setColour(col);
-        g.drawText("LFO " + juce::String(lfoIdx+1),
+        g.fillRect(getLocalBounds().removeFromTop(2).toFloat().reduced(3.0f,0.0f));
+        g.setColour(juce::Colour(KC_BORDER).withAlpha(0.6f));
+        g.drawRoundedRectangle(getLocalBounds().toFloat().reduced(0.5f),3.0f,1.0f);
+        g.setFont(juce::Font(9.0f,juce::Font::bold)); g.setColour(col);
+        g.drawText("LFO "+juce::String(lfoIdx+1),
                    getLocalBounds().removeFromTop(15).reduced(5,2),
                    juce::Justification::centred);
     }
 
 private:
-    void setShape(int idx) {
+    void setShape(int idx2)
+    {
         proc.apvts.getParameter(proc.pid(lfoIdx,"shape"))
-            ->setValueNotifyingHost((float)idx / 4.f);
-        for (int si = 0; si < shapeButtons.size(); ++si) {
-            auto col = KC::lfoCol(lfoIdx);
+            ->setValueNotifyingHost((float)idx2/4.0f);
+        juce::Colour col=juce::Colour(KC_LFO[lfoIdx]);
+        for(int si=0;si<shapeButtons.size();++si){
+            bool on=(si==idx2);
             shapeButtons[si]->setColour(juce::TextButton::buttonColourId,
-                si == idx ? col.withAlpha(0.25f) : KC::modBg);
+                on?col.withAlpha(0.25f):juce::Colour(KC_MOD));
             shapeButtons[si]->setColour(juce::TextButton::textColourOffId,
-                si == idx ? col : KC::textDim);
+                on?col:juce::Colour(KC_DIM));
         }
     }
-
-    void setPolar(int val) {
+    void setPolar(int val)
+    {
         proc.apvts.getParameter(proc.pid(lfoIdx,"polar"))
             ->setValueNotifyingHost((float)val);
-        updatePolarButtons();
-    }
-
-    void updatePolarButtons() {
-        int cur = (int)(*proc.apvts.getRawParameterValue(proc.pid(lfoIdx,"polar")));
-        biBtn .setColour(juce::TextButton::buttonColourId,
-            cur==0 ? KC::orange.withAlpha(0.25f) : KC::modBg);
-        biBtn .setColour(juce::TextButton::textColourOffId, cur==0 ? KC::orange : KC::textDim);
+        bool bi=(val==0);
+        biBtn.setColour(juce::TextButton::buttonColourId,
+            bi?juce::Colour(KC_ORANGE).withAlpha(0.25f):juce::Colour(KC_MOD));
+        biBtn.setColour(juce::TextButton::textColourOffId,
+            bi?juce::Colour(KC_ORANGE):juce::Colour(KC_DIM));
         uniBtn.setColour(juce::TextButton::buttonColourId,
-            cur==1 ? KC::orange.withAlpha(0.25f) : KC::modBg);
-        uniBtn.setColour(juce::TextButton::textColourOffId, cur==1 ? KC::orange : KC::textDim);
+            !bi?juce::Colour(KC_ORANGE).withAlpha(0.25f):juce::Colour(KC_MOD));
+        uniBtn.setColour(juce::TextButton::textColourOffId,
+            !bi?juce::Colour(KC_ORANGE):juce::Colour(KC_DIM));
     }
 
-    auto makeLbl(const char* txt) {
-        juce::Label* l = new juce::Label();
-        l->setText(txt, juce::dontSendNotification);
-        l->setFont(juce::Font("Courier New", 7.f, juce::Font::plain));
-        l->setColour(juce::Label::textColourId, KC::textDim);
-        l->setJustificationType(juce::Justification::centredLeft);
-        addAndMakeVisible(l);
-        return l;
-    }
-
-    SlowLFOProcessor& proc;
-    int lfoIdx;
+    SlowLFOProcessor& proc; int lfoIdx;
     ScopeDisplay scope;
-
     juce::OwnedArray<juce::TextButton> shapeButtons;
     juce::Slider rateKnob, depthKnob, ccSpinner, chSpinner;
     juce::TextButton biBtn, uniBtn;
-
     std::unique_ptr<juce::AudioProcessorValueTreeState::SliderAttachment>
         rateAttach, depthAttach, ccAttach, chAttach;
-
-    // Labels — stored as owned pointers
-    struct Labels {
-        juce::Label rate{"","RATE"}, depth{"","DEPTH"}, cc{"","CC OUT"}, ch{"","MIDI CH"};
-        juce::Label hz{""," "}, pct{""," "}, liveCC{"","64"};
-    } labels;
-
-    juce::Label& rateLbl    = labels.rate;
-    juce::Label& depthLbl   = labels.depth;
-    juce::Label& ccLbl      = labels.cc;
-    juce::Label& chLbl      = labels.ch;
-    juce::Label& hzLabel    = labels.hz;
-    juce::Label& pctLabel   = labels.pct;
-    juce::Label& liveCCLabel= labels.liveCC;
-
-    void initLabels() {
-        auto styleLabel = [&](juce::Label& l, const char* txt, juce::Colour col=KC::textDim){
-            l.setText(txt, juce::dontSendNotification);
-            l.setFont(juce::Font("Courier New", 7.f, juce::Font::plain));
-            l.setColour(juce::Label::textColourId, col);
-            l.setJustificationType(juce::Justification::centredLeft);
-            addAndMakeVisible(l);
-        };
-        styleLabel(rateLbl,   "RATE");
-        styleLabel(depthLbl,  "DEPTH");
-        styleLabel(ccLbl,     "CC OUT");
-        styleLabel(chLbl,     "MIDI CH");
-        styleLabel(hzLabel,   " ", KC::textDim);
-        styleLabel(pctLabel,  " ", KC::orange);
-        styleLabel(liveCCLabel,"64", KC::teal);
-    }
-
+    juce::Label rateLbl, depthLbl, ccLbl, chLbl, hzLbl, pctLbl, liveLbl;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(LFOStrip)
 };
 
-// ── Main editor ───────────────────────────────────────────────────────────
 class SlowLFOEditor : public juce::AudioProcessorEditor
 {
 public:
-    explicit SlowLFOEditor(SlowLFOProcessor& p)
-        : AudioProcessorEditor(p), proc(p)
+    explicit SlowLFOEditor(SlowLFOProcessor& p) : AudioProcessorEditor(p), proc(p)
     {
-        setSize(780, 420);
-        setResizable(true, true);
-        setResizeLimits(600, 340, 1200, 640);
-
-        for (int i = 0; i < NUM_LFOS; ++i) {
-            auto* s = new LFOStrip(p, i);
-            strips.add(s);
-            addAndMakeVisible(s);
-        }
+        setSize(780, 420); setResizable(true,true); setResizeLimits(600,340,1200,640);
+        for(int i=0;i<NUM_LFOS;++i){ strips.add(new LFOStrip(p,i)); addAndMakeVisible(strips.getLast()); }
     }
 
     void resized() override
     {
-        auto a = getLocalBounds().reduced(10);
-        // Header
-        a.removeFromTop(32);
-        // 6 strips
-        int sw = a.getWidth() / NUM_LFOS;
-        for (auto* s : strips)
-            s->setBounds(a.removeFromLeft(sw).reduced(3, 0));
+        auto a=getLocalBounds().reduced(10); a.removeFromTop(36);
+        int sw=a.getWidth()/NUM_LFOS;
+        for(auto* s:strips) s->setBounds(a.removeFromLeft(sw).reduced(3,0));
     }
 
     void paint(juce::Graphics& g) override
     {
-        // Panel background
-        g.setColour(KC::panelBg);
-        g.fillAll();
+        g.setColour(juce::Colour(KC_PANEL)); g.fillAll();
+        g.setColour(juce::Colour(KC_BORDER).withAlpha(0.08f));
+        for(int y=0;y<getHeight();y+=4) g.drawHorizontalLine(y,0.0f,(float)getWidth());
 
-        // Subtle texture lines
-        g.setColour(KC::border.withAlpha(0.08f));
-        for (int y = 0; y < getHeight(); y += 4)
-            g.drawHorizontalLine(y, 0.f, (float)getWidth());
+        float W=(float)getWidth(), H=(float)getHeight();
+        float sx[4]={8.0f,W-8.0f,8.0f,W-8.0f}, sy[4]={8.0f,8.0f,H-8.0f,H-8.0f};
+        for(int i=0;i<4;++i){
+            g.setColour(juce::Colour(KC_BORDER).withAlpha(0.4f));
+            g.fillEllipse(sx[i]-4.0f,sy[i]-4.0f,8.0f,8.0f);
+            g.setColour(juce::Colour(KC_PANEL));
+            g.drawLine(sx[i]-2.0f,sy[i],sx[i]+2.0f,sy[i],1.0f);
+            g.drawLine(sx[i],sy[i]-2.0f,sx[i],sy[i]+2.0f,1.0f);
+        }
 
-        // Corner screws
-        auto drawScrew = [&](float x, float y) {
-            g.setColour(KC::border.withAlpha(0.4f));
-            g.fillEllipse(x-4, y-4, 8, 8);
-            g.setColour(KC::panelBg);
-            g.drawLine(x-2, y, x+2, y, 1.f);
-            g.drawLine(x, y-2, x, y+2, 1.f);
-        };
-        drawScrew(8, 8);
-        drawScrew(getWidth()-8, 8);
-        drawScrew(8, getHeight()-8);
-        drawScrew(getWidth()-8, getHeight()-8);
-
-        // Header
-        auto hdr = getLocalBounds().removeFromTop(36).reduced(12, 4);
-
-        // Kingfisher SVG logo (drawn procedurally)
-        drawKingfisher(g, 12.f, 4.f, 28.f);
-
-        // Title
-        g.setFont(juce::Font("Courier New", 15.f, juce::Font::bold));
-        g.setColour(KC::text);
-        g.drawText("SLOW  LFO", hdr.withX(50), juce::Justification::centredLeft);
-
-        g.setFont(juce::Font("Courier New", 8.f, juce::Font::plain));
-        g.setColour(KC::textDim);
+        drawKingfisher(g,12.0f,5.0f,26.0f);
+        g.setFont(juce::Font(15.0f,juce::Font::bold));
+        g.setColour(juce::Colour(KC_TEXT));
+        g.drawText("SLOW  LFO",juce::Rectangle<int>(50,0,200,36),juce::Justification::centredLeft);
+        g.setFont(juce::Font(8.0f)); g.setColour(juce::Colour(KC_DIM));
         g.drawText("MIDI CC MODULATOR  //  6 INDEPENDENT LFOS",
-                   hdr, juce::Justification::centredRight);
+                   getLocalBounds().removeFromTop(36).reduced(12,4),
+                   juce::Justification::centredRight);
     }
 
 private:
-    void drawKingfisher(juce::Graphics& g, float x, float y, float h)
+    void drawKingfisher(juce::Graphics& g,float x,float y,float h)
     {
-        float s = h / 26.f;
-        auto t = [&](float px, float py) -> juce::Point<float> {
-            return {x + px*s, y + py*s};
-        };
-
-        // Tail
+        float s=h/26.0f;
         juce::Path tail;
-        tail.addTriangle(t(30,11), t(26,9), t(26,15));
-        g.setColour(juce::Colour(0xff007a90));
-        g.fillPath(tail);
-
-        // Body - orange
-        g.setColour(juce::Colour(0xffc84010));
-        g.fillEllipse(x+17*s-9*s, y+16*s-7*s, 18*s, 14*s);
-
-        // Back - blue
-        g.setColour(juce::Colour(0xff0090b0));
-        g.fillEllipse(x+16*s-10*s, y+11*s-5.5f*s, 20*s, 11*s);
-
-        // Head
-        g.setColour(juce::Colour(0xff005870));
-        g.fillEllipse(x+9*s-6*s, y+11*s-6*s, 12*s, 12*s);
-
-        // Crown
-        g.setColour(juce::Colour(0xff003850));
-        g.fillEllipse(x+9*s-5*s, y+8*s-2.5f*s, 10*s, 5*s);
-
-        // Cheek
-        g.setColour(juce::Colour(0xffc8e8f0).withAlpha(0.8f));
-        g.fillEllipse(x+8*s-2.5f*s, y+13*s-1.5f*s, 5*s, 3*s);
-
-        // Beak
+        tail.addTriangle(x+30*s,y+11*s,x+26*s,y+9*s,x+26*s,y+15*s);
+        g.setColour(juce::Colour(0xff007a90u)); g.fillPath(tail);
+        g.setColour(juce::Colour(0xffc84010u)); g.fillEllipse(x+8*s,y+9*s,18*s,14*s);
+        g.setColour(juce::Colour(0xff0090b0u)); g.fillEllipse(x+6*s,y+5.5f*s,20*s,11*s);
+        g.setColour(juce::Colour(0xff005870u)); g.fillEllipse(x+3*s,y+5*s,12*s,12*s);
+        g.setColour(juce::Colour(0xff003850u)); g.fillEllipse(x+4*s,y+5.5f*s,10*s,5*s);
+        g.setColour(juce::Colour(0xffc8e8f0u).withAlpha(0.8f)); g.fillEllipse(x+5.5f*s,y+11.5f*s,5*s,3*s);
         juce::Path beak;
-        beak.addTriangle(t(4,10.5f), t(-4,11.5f), t(-4,10.f));
-        g.setColour(juce::Colour(0xff0a1820));
-        g.fillPath(beak);
-
-        // Eye
-        g.setColour(juce::Colour(0xff0a1820));
-        g.fillEllipse(x+7*s-1.8f*s, y+10.5f*s-1.8f*s, 3.6f*s, 3.6f*s);
-        g.setColour(juce::Colours::white.withAlpha(0.9f));
-        g.fillEllipse(x+7*s-1.1f*s, y+10.5f*s-1.1f*s, 2.2f*s, 2.2f*s);
-        g.setColour(juce::Colour(0xff0a1820));
-        g.fillEllipse(x+7.3f*s-0.5f*s, y+10.2f*s-0.5f*s, 1.f*s, 1.f*s);
-
-        // Highlight
-        g.setColour(juce::Colour(0xff40c8e0).withAlpha(0.35f));
-        g.fillEllipse(x+18*s-6*s, y+9*s-2*s, 12*s, 4*s);
+        beak.addTriangle(x+4*s,y+10.5f*s,x-4*s,y+11.5f*s,x-4*s,y+10.0f*s);
+        g.setColour(juce::Colour(0xff0a1820u)); g.fillPath(beak);
+        g.setColour(juce::Colour(0xff0a1820u)); g.fillEllipse(x+5.2f*s,y+8.7f*s,3.6f*s,3.6f*s);
+        g.setColour(juce::Colours::white.withAlpha(0.9f)); g.fillEllipse(x+5.9f*s,y+9.4f*s,2.2f*s,2.2f*s);
+        g.setColour(juce::Colour(0xff0a1820u)); g.fillEllipse(x+6.3f*s,y+9.7f*s,1.0f*s,1.0f*s);
+        g.setColour(juce::Colour(0xff40c8e0u).withAlpha(0.35f)); g.fillEllipse(x+12*s,y+7*s,12*s,4*s);
     }
 
     SlowLFOProcessor& proc;
     juce::OwnedArray<LFOStrip> strips;
-
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SlowLFOEditor)
 };
