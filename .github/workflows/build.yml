@@ -1,0 +1,39 @@
+name: Build Slow LFO VST3
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build-windows:
+    name: Windows VST3
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: SlowLFO-Windows-VST3
+          path: build/**/*.vst3
+          if-no-files-found: warn
+
+  build-macos:
+    name: macOS VST3
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Build
+        run: cmake --build build --config Release --parallel $(sysctl -n hw.logicalcpu)
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: SlowLFO-macOS-VST3
+          path: build/**/*.vst3
+          if-no-files-found: warn
